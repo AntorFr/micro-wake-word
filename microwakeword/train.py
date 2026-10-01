@@ -70,7 +70,12 @@ def validate_nonstreaming(config, data_processor, model, test_set):
     metrics["ambient_false_positives_per_hour"] = 0
     metrics["average_viable_recall"] = 0
 
-    test_set_fp = result["fp"].numpy()
+    def _arr(v):
+        """Convert a TF tensor or numpy array to numpy, keeping shape."""
+        import numpy as _np
+        return v.numpy() if hasattr(v, "numpy") else _np.asarray(v)
+
+    test_set_fp = _arr(result["fp"])
 
     if data_processor.get_mode_size("validation_ambient") > 0:
         (
@@ -101,9 +106,9 @@ def validate_nonstreaming(config, data_processor, model, test_set):
 
         # Other than the false positive rate, all other metrics are accumulated across
         # both test sets
-        all_true_positives = ambient_predictions["tp"].numpy()
-        ambient_false_positives = ambient_predictions["fp"].numpy() - test_set_fp
-        all_false_negatives = ambient_predictions["fn"].numpy()
+        all_true_positives = _arr(ambient_predictions["tp"])
+        ambient_false_positives = _arr(ambient_predictions["fp"]) - test_set_fp
+        all_false_negatives = _arr(ambient_predictions["fn"])
 
         metrics["auc"] = ambient_predictions["auc"]
         metrics["loss"] = ambient_predictions["loss"]
@@ -151,7 +156,7 @@ def validate_nonstreaming(config, data_processor, model, test_set):
 
         # Use trapezoid rule to estimate the area under the curve, then divide by 2.0 to get the average recall
         average_viable_recall = (
-            np.trapz(np.flip(y_coordinates), np.flip(x_coordinates)) / 2.0
+            getattr(np, "trapezoid", np.trapz)(np.flip(y_coordinates), np.flip(x_coordinates)) / 2.0
         )
 
         metrics["recall_at_no_faph"] = recall_at_no_faph
@@ -203,7 +208,33 @@ def train(model, config, data_processor):
     pad_list_with_last_entry(positive_class_weight_list, training_step_iterations)
     pad_list_with_last_entry(negative_class_weight_list, training_step_iterations)
 
-    loss = tf.keras.losses.BinaryCrossentropy(from_logits=False)
+    # Loss selection (Nestor add-on). Default = BCE (upstream behaviour). Optional
+    # focal loss to down-weight easy examples and concentrate learning on hard
+    # ones / false accepts (LiveKit-inspired). Class weights are already applied
+    # via `sample_weight` below, so we do NOT enable the loss' own
+    # apply_class_balancing (that would double-count). The "loss" *metric* further
+    # down stays BinaryCrossentropy, so the logged/compared loss is consistent
+    # across runs regardless of the training objective.
+    loss_type = str(config.get("loss_type", "bce")).lower()
+    label_smoothing = float(config.get("label_smoothing", 0.0) or 0.0)
+    if loss_type == "focal":
+        focal_gamma = float(config.get("focal_gamma", 2.0))
+        loss = tf.keras.losses.BinaryFocalCrossentropy(
+            gamma=focal_gamma,
+            from_logits=False,
+            label_smoothing=label_smoothing,
+        )
+        logging.info(
+            "Loss: BinaryFocalCrossentropy (gamma=%.2f, label_smoothing=%.3f)",
+            focal_gamma,
+            label_smoothing,
+        )
+    else:
+        loss = tf.keras.losses.BinaryCrossentropy(
+            from_logits=False,
+            label_smoothing=label_smoothing,
+        )
+        logging.info("Loss: BinaryCrossentropy (label_smoothing=%.3f)", label_smoothing)
     optimizer = tf.keras.optimizers.Adam()
 
     cutoffs = np.linspace(0.0, 1.0, 101).tolist()

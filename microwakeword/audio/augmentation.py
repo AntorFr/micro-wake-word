@@ -115,6 +115,15 @@ class Augmentation:
         # Based on openWakeWord's augmentations, accessed on February 23, 2024.
         self.augment = audiomentations.Compose(
             transforms=[
+                # Tempo augmentation (pitch-preserving). Nestor addition: ElevenLabs
+                # TTS only covers slow speech (speed 0.85-1.15), so the model fails on
+                # natural/fast speech. TimeStretch with rate>1 speeds up the utterance.
+                audiomentations.TimeStretch(
+                    p=augmentation_probabilities.get("TimeStretch", 0.0),
+                    min_rate=augmentation_probabilities.get("TimeStretch_min_rate", 1.0),
+                    max_rate=augmentation_probabilities.get("TimeStretch_max_rate", 1.6),
+                    leave_length_unchanged=True,
+                ),
                 audiomentations.SevenBandParametricEQ(
                     p=augmentation_probabilities.get("SevenBandParametricEQ", 0.0),
                     min_gain_db=-6,

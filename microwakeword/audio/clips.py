@@ -21,6 +21,7 @@ import random
 import wave
 
 import numpy as np
+import soundfile as sf
 
 from pathlib import Path
 
@@ -132,14 +133,10 @@ class Clips:
                         ):
                             filtered_paths.append(audio_file)
 
-        # Load all filtered clips
+        # Store audio file paths — audio is loaded on demand via soundfile
+        # (bypasses datasets.Audio which requires torchcodec in datasets>=5.0)
         audio_dataset = datasets.Dataset.from_dict(
-            {"audio": [str(i) for i in filtered_paths]}
-        ).cast_column("audio", datasets.Audio())
-
-        # Convert all clips to 16 kHz sampling rate when accessed
-        audio_dataset = audio_dataset.cast_column(
-            "audio", datasets.Audio(sampling_rate=16000)
+            {"audio_path": [str(i) for i in filtered_paths]}
         )
 
         if random_split_seed is not None:
@@ -158,6 +155,22 @@ class Clips:
 
         self.clips = audio_dataset
 
+    @staticmethod
+    def _load_wav(path: str) -> np.ndarray:
+        """Load a WAV file as a float32 numpy array at 16 kHz mono."""
+        data, sr = sf.read(path, dtype="float32", always_2d=False)
+        if data.ndim > 1:
+            data = data.mean(axis=1)
+        if sr != 16000:
+            try:
+                import librosa
+                data = librosa.resample(data, orig_sr=sr, target_sr=16000)
+            except ImportError:
+                import scipy.signal
+                target_len = int(len(data) * 16000 / sr)
+                data = scipy.signal.resample(data, target_len)
+        return data.astype(np.float32)
+
     def audio_generator(self, split: str | None = None, repeat: int = 1):
         """A Python generator that retrieves all loaded audio clips.
 
@@ -174,7 +187,7 @@ class Clips:
             clip_list = self.split_clips[split]
         for _ in range(repeat):
             for clip in clip_list:
-                clip_audio = clip["audio"]["array"]
+                clip_audio = self._load_wav(clip["audio_path"])
 
                 if self.remove_silence:
                     clip_audio = self.remove_silence_function(clip_audio)
@@ -196,7 +209,7 @@ class Clips:
             numpy.ndarray: Array with the audio clip's samples.
         """
         rand_audio_entry = random.choice(self.clips)
-        clip_audio = rand_audio_entry["audio"]["array"]
+        clip_audio = self._load_wav(rand_audio_entry["audio_path"])
 
         if self.remove_silence:
             clip_audio = self.remove_silence_function(clip_audio)
