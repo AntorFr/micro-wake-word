@@ -15,6 +15,7 @@
 # limitations under the License.
 
 import os
+from concurrent.futures import ThreadPoolExecutor
 import platform
 import contextlib
 
@@ -277,6 +278,38 @@ def train(model, config, data_processor):
     best_maximization_quantity = 0.0
     best_no_faph_cutoff = 1.0
 
+    def _training_batch(step):
+        """Lot d'entraînement du pas `step`, avec la politique d'augmentation de SA
+        phase (même lookup que la boucle ci-dessous)."""
+        steps_sum = 0
+        for k in range(len(training_steps_list)):
+            steps_sum += training_steps_list[k]
+            if step <= steps_sum:
+                break
+        policy = {
+            "mix_up_prob": mix_up_prob_list[k],
+            "freq_mix_prob": freq_mix_prob_list[k],
+            "time_mask_max_size": time_mask_max_size_list[k],
+            "time_mask_count": time_mask_count_list[k],
+            "freq_mask_max_size": freq_mask_max_size_list[k],
+            "freq_mask_count": freq_mask_count_list[k],
+        }
+        return data_processor.get_data(
+            "training",
+            batch_size=config["batch_size"],
+            features_length=config["spectrogram_length"],
+            truncation_strategy="default",
+            augmentation_policy=policy,
+        )
+
+    # Préchargement : le lot du pas N+1 est tiré (Python, mono-cœur) pendant que
+    # TensorFlow calcule le pas N. Même distribution de données, même politique
+    # d'augmentation par phase ; seul l'enchaînement des tirages aléatoires change.
+    # MWW_PREFETCH=0 pour revenir au comportement séquentiel.
+    prefetch = os.environ.get("MWW_PREFETCH", "1") == "1"
+    prefetcher = ThreadPoolExecutor(max_workers=1) if prefetch else None
+    next_batch = prefetcher.submit(_training_batch, 1) if prefetch else None
+
     for training_step in range(1, training_steps_max + 1):
         training_steps_sum = 0
         for i in range(len(training_steps_list)):
@@ -304,17 +337,17 @@ def train(model, config, data_processor):
             "freq_mask_count": freq_mask_count,
         }
 
+        if prefetch:
+            batch = next_batch.result()
+            if training_step < training_steps_max:
+                next_batch = prefetcher.submit(_training_batch, training_step + 1)
+        else:
+            batch = _training_batch(training_step)
         (
             train_fingerprints,
             train_ground_truth,
             train_sample_weights,
-        ) = data_processor.get_data(
-            "training",
-            batch_size=config["batch_size"],
-            features_length=config["spectrogram_length"],
-            truncation_strategy="default",
-            augmentation_policy=augmentation_policy,
-        )
+        ) = batch
 
         train_ground_truth = train_ground_truth.reshape(-1, 1)
 
@@ -491,3 +524,5 @@ def train(model, config, data_processor):
     # Save checkpoint after training
     checkpoint.save(file_prefix=checkpoint_prefix)
     model.save_weights(os.path.join(config["train_dir"], "last_weights.weights.h5"))
+    if prefetcher is not None:
+        prefetcher.shutdown(wait=False)
