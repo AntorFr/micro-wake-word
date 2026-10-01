@@ -414,6 +414,7 @@ class FeatureHandler(object):
         config: dict,
     ):
         self.feature_providers = []
+        self._eval_cache = {}
 
         logging.info("Loading and analyzing data sets.")
 
@@ -528,6 +529,21 @@ class FeatureHandler(object):
             weights: penalizing weight for incorrect predictions for each spectrogram
         """
 
+        # Jeux d'évaluation (validation/testing/*_ambient) : leur contenu ne dépend
+        # que de (mode, longueur, troncature) — aucun tirage aléatoire hormis l'ordre,
+        # sans effet sur les métriques. Les reconstruire à chaque évaluation (boucle
+        # Python, ~6 Go pour 20 h d'ambiance) coûtait ~20 s toutes les 500 étapes.
+        # → construits une fois, puis resservis. MWW_CACHE_EVAL=0 pour désactiver.
+        cache_key = None
+        # Uniquement si tous les jeux sont précalculés (mmap) : un jeu « clips » est
+        # ré-augmenté aléatoirement à chaque appel, le figer changerait son rôle.
+        if (mode != "training" and os.environ.get("MWW_CACHE_EVAL", "1") == "1"
+                and all(isinstance(p, MmapFeatureGenerator) for p in self.feature_providers)):
+            cache_key = (mode, features_length, truncation_strategy)
+            cached = self._eval_cache.get(cache_key)
+            if cached is not None:
+                return cached
+
         if mode == "training":
             sample_count = batch_size
         elif (mode == "validation") or (mode == "testing"):
@@ -586,12 +602,16 @@ class FeatureHandler(object):
 
         if truncation_strategy == "none":
             # Spectrograms may be of different length
-            return data, np.array(labels), np.array(weights)
+            result = data, np.array(labels), np.array(weights)
+        else:
+            indices = np.arange(labels.shape[0])
 
-        indices = np.arange(labels.shape[0])
+            if mode == "testing" or "validation":
+                # Randomize the order of the data, weights, and labels
+                np.random.shuffle(indices)
 
-        if mode == "testing" or "validation":
-            # Randomize the order of the data, weights, and labels
-            np.random.shuffle(indices)
+            result = data[indices], labels[indices], weights[indices]
 
-        return data[indices], labels[indices], weights[indices]
+        if cache_key is not None:
+            self._eval_cache[cache_key] = result
+        return result
