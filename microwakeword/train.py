@@ -70,6 +70,11 @@ def validate_nonstreaming(config, data_processor, model, test_set):
     metrics["ambient_false_positives"] = 0
     metrics["ambient_false_positives_per_hour"] = 0
     metrics["average_viable_recall"] = 0
+    # Métriques AU SEUIL DE DÉPLOIEMENT (config["selection_cutoff"], ex. 0.97) : la
+    # sélection historique se fait au seuil 0.5 (faph) + un recall moyen sur une plage
+    # de seuils, alors qu'en prod seul compte « positif > cutoff, négatif < cutoff ».
+    metrics["ambient_false_positives_per_hour_at_selection"] = 0
+    metrics["recall_at_selection"] = 0
 
     def _arr(v):
         """Convert a TF tensor or numpy array to numpy, keeping shape."""
@@ -164,6 +169,15 @@ def validate_nonstreaming(config, data_processor, model, test_set):
         metrics["cutoff_for_no_faph"] = target_faph_cutoff_probability
         metrics["ambient_false_positives"] = ambient_false_positives[50]
         metrics["ambient_false_positives_per_hour"] = faph_at_cutoffs[50]
+        sel = config.get("selection_cutoff")
+        if sel is not None:
+            k = int(round(float(sel) * 100))      # cutoffs = linspace(0, 1, 101)
+            metrics["ambient_false_positives_per_hour_at_selection"] = faph_at_cutoffs[k]
+            metrics["recall_at_selection"] = recall_at_cutoffs[k]
+            logging.info(
+                "Au seuil de sélection %.2f : recall = %.2f%%, FA/h ambiance = %.4f",
+                float(sel), 100 * float(recall_at_cutoffs[k]), float(faph_at_cutoffs[k]),
+            )
         metrics["average_viable_recall"] = average_viable_recall
 
     return metrics
