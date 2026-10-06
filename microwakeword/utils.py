@@ -318,7 +318,10 @@ def convert_saved_model_to_tflite(
         stride = config["stride"]
 
         for spectrogram in sample_fingerprints:
-            assert spectrogram.shape[0] % stride == 0
+            # Données de CALIBRATION uniquement : si la longueur n'est pas un multiple du
+            # stride (ex. clip_duration_ms court → 163 trames pour stride 3), on ignore les
+            # premières trames au lieu d'échouer après tout l'entraînement.
+            spectrogram = spectrogram[spectrogram.shape[0] % stride:]
 
             for i in range(0, spectrogram.shape[0] - stride, stride):
                 sample = spectrogram[i : i + stride, :].astype(np.float32)
